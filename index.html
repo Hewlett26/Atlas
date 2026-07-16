@@ -652,6 +652,13 @@ color:var(--text);resize:vertical;word-break:break-all;
 }
 .sync-step .btn-secondary,.sync-step .btn-continue{margin-top:10px;width:100%;justify-content:center;}
 .sync-status{margin-top:10px;font-size:13px;color:var(--text-dim);text-align:center;}
+.sas-label{font-size:14px;font-weight:600;color:var(--text-dim);text-align:center;margin-bottom:14px;}
+.sas-code{
+font-family:'JetBrains Mono',monospace;font-size:40px;font-weight:800;letter-spacing:0.12em;
+text-align:center;color:var(--accent);padding:18px 0;
+background:color-mix(in srgb,var(--accent) 10%,var(--surface-2));border-radius:var(--radius-m);
+}
+.sas-hint{font-size:12px;color:var(--text-faint);text-align:center;margin-top:12px;line-height:1.5;}
 #conflict-overlay{
 position:fixed;inset:0;z-index:310;display:none;
 background:rgba(0,0,0,0.4);backdrop-filter:blur(6px);
@@ -840,7 +847,7 @@ main{padding:20px 18px 110px;}
 <div id="sync-overlay">
 <div class="confirm-box sync-box">
 <div class="confirm-title" id="sync-title">Pair a device</div>
-<div class="confirm-msg" id="sync-msg">Both devices need to be on the same Wi-Fi network. No data leaves your network — this just exchanges a connection handshake, not your journal.</div>
+<div class="confirm-msg" id="sync-msg">Both devices need to be on the same Wi-Fi network. You'll confirm a short code on both screens before anything syncs — no data leaves your network either way.</div>
 <div class="sync-choice" id="sync-choice">
 <button class="export-option" id="sync-start">
 <div class="export-option-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="4" width="16" height="16" rx="3"></rect><path d="M8 4v16M4 8h16"></path></svg></div>
@@ -869,6 +876,13 @@ main{padding:20px 18px 110px;}
 <button class="btn-secondary" id="sync-copy-answer">Copy code</button>
 <div class="sync-status" id="sync-waiting">Waiting to connect...</div>
 </div>
+</div>
+<div class="sync-step" id="sync-step-verify" style="display:none">
+<div class="sas-label">Do both devices show this code?</div>
+<div class="sas-code" id="sas-code">000000</div>
+<div class="sas-hint">If it doesn't match on both screens, don't confirm — cancel and try again.</div>
+<button class="btn-continue" id="sync-confirm-sas">Yes, It Matches — Pair</button>
+<button class="btn-secondary" id="sync-reject-sas">It Doesn't Match</button>
 </div>
 <div class="confirm-actions">
 <button class="btn-secondary" id="sync-cancel">Close</button>
@@ -1476,12 +1490,39 @@ var answer=Sync.decode(answerCode);
 return Sync.pc.setRemoteDescription({type:"answer",sdp:answer.sdp});
 },
 
+extractField:function(sdp,name){
+var m=sdp.match(new RegExp("a="+name+":([^\\r\\n]+)"));
+return m?m[1]:"";
+},
+
+computeSAS:function(){
+var localSdp=Sync.pc.localDescription?Sync.pc.localDescription.sdp:"";
+var remoteSdp=Sync.pc.remoteDescription?Sync.pc.remoteDescription.sdp:"";
+var localFp=Sync.extractField(localSdp,"fingerprint");
+var remoteFp=Sync.extractField(remoteSdp,"fingerprint");
+var parts=[localFp,remoteFp].sort();
+var hash=Utils.hash(parts.join("|"));
+var code=hash%1000000;
+return ("000000"+code).slice(-6);
+},
+
+onConnected:function(){},
+
+confirmAndSync:function(){
+Sync.onStatus("connected");
+Sync.sendManifest();
+},
+
+cancelPairing:function(){
+Sync.reset();
+},
+
 setupChannel:function(dc){
 Sync.dc=dc;
 dc.binaryType="arraybuffer";
 dc.addEventListener("open",function(){
-Sync.onStatus("connected");
-Sync.sendManifest();
+var sas=Sync.computeSAS();
+Sync.onConnected(sas);
 });
 dc.addEventListener("close",function(){Sync.onStatus("closed");});
 dc.addEventListener("message",function(e){Sync.handleMessage(e.data);});
@@ -3142,6 +3183,7 @@ document.getElementById("sync-overlay").classList.add("open");
 document.getElementById("sync-choice").style.display="flex";
 document.getElementById("sync-step-offer").style.display="none";
 document.getElementById("sync-step-join").style.display="none";
+document.getElementById("sync-step-verify").style.display="none";
 document.getElementById("sync-offer-code").value="";
 document.getElementById("sync-answer-input").value="";
 document.getElementById("sync-offer-input").value="";
@@ -3150,6 +3192,13 @@ document.getElementById("sync-answer-wrap").style.display="none";
 }
 function closeSyncOverlay(){
 document.getElementById("sync-overlay").classList.remove("open");
+}
+
+function showSasStep(sasCode){
+document.getElementById("sync-step-offer").style.display="none";
+document.getElementById("sync-step-join").style.display="none";
+document.getElementById("sync-step-verify").style.display="block";
+document.getElementById("sas-code").textContent=sasCode;
 }
 
 function finalizePairing(){
@@ -3233,9 +3282,7 @@ if(!code)return;
 Sync.createAnswer(code).then(function(answer){
 document.getElementById("sync-answer-code").value=answer;
 document.getElementById("sync-answer-wrap").style.display="block";
-Sync.onStatus=function(status){
-if(status==="connected")finalizePairing();
-};
+Sync.onConnected=showSasStep;
 }).catch(function(){
 showToast("That code didn't work — check it and try again");
 });
@@ -3243,16 +3290,28 @@ showToast("That code didn't work — check it and try again");
 document.getElementById("sync-finish").addEventListener("click",function(){
 var code=document.getElementById("sync-answer-input").value.trim();
 if(!code)return;
-Sync.onStatus=function(status){
-if(status==="connected")finalizePairing();
-};
+Sync.onConnected=showSasStep;
 Sync.completeConnection(code).catch(function(){
 showToast("That code didn't work — check it and try again");
 });
 });
-document.getElementById("sync-cancel").addEventListener("click",closeSyncOverlay);
+document.getElementById("sync-confirm-sas").addEventListener("click",function(){
+Sync.onStatus=function(status){
+if(status==="connected")finalizePairing();
+};
+Sync.confirmAndSync();
+});
+document.getElementById("sync-reject-sas").addEventListener("click",function(){
+Sync.cancelPairing();
+showToast("Pairing cancelled");
+closeSyncOverlay();
+});
+document.getElementById("sync-cancel").addEventListener("click",function(){
+Sync.cancelPairing();
+closeSyncOverlay();
+});
 document.getElementById("sync-overlay").addEventListener("click",function(e){
-if(e.target.id==="sync-overlay")closeSyncOverlay();
+if(e.target.id==="sync-overlay"){Sync.cancelPairing();closeSyncOverlay();}
 });
 
 Sync.onConflict=showNextConflict;
